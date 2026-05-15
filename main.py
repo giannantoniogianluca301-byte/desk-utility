@@ -6,6 +6,109 @@ import platform
 import psutil
 import threading
 import urllib.request
+import subprocess
+
+# ─────────────────────────────────────────
+#  SPLASH SCREEN: controllo avvio
+# ─────────────────────────────────────────
+def _avvia_splash():
+    splash = tk.Tk()
+    splash.title("DESK APP — Avvio")
+    splash.geometry("320x180")
+    splash.resizable(False, False)
+    splash.configure(bg="white")
+    splash.attributes("-alpha", 0.95)
+    splash.update_idletasks()
+    x = (splash.winfo_screenwidth()  - 320) // 2
+    y = (splash.winfo_screenheight() - 180) // 2
+    splash.geometry(f"320x180+{x}+{y}")
+
+    tk.Label(splash, text="🖥  DESK APP", font=("Arial", 16, "bold"),
+             bg="white", fg="#2c3e50").pack(pady=(20, 4))
+    lbl_stato = tk.Label(splash, text="Avvio in corso...",
+                         font=("Arial", 9), bg="white", fg="#7f8c8d")
+    lbl_stato.pack()
+    canvas = tk.Canvas(splash, width=260, height=14, bg="#ecf0f1",
+                       highlightthickness=0, bd=0)
+    canvas.pack(pady=10)
+    barra = canvas.create_rectangle(0, 0, 0, 14, fill="#1abc9c", outline="")
+    lbl_dettaglio = tk.Label(splash, text="", font=("Arial", 8),
+                              bg="white", fg="#95a5a6")
+    lbl_dettaglio.pack()
+
+    def _set(pct, stato, dettaglio="", colore="#1abc9c"):
+        canvas.coords(barra, 0, 0, int(260 * pct / 100), 14)
+        canvas.itemconfig(barra, fill=colore)
+        lbl_stato.config(text=stato)
+        lbl_dettaglio.config(text=dettaglio)
+
+    # ogni step è schedulato con after() — tutto sul main thread
+    def step1():
+        _set(20, "Controllo librerie...", "psutil")
+        try:
+            psutil.cpu_percent()
+        except Exception as e:
+            _set(20, "❌ psutil mancante", str(e), "#e74c3c")
+        splash.after(500, step2)
+
+    def step2():
+        _set(50, "Controllo file dati...", "note, link, promemoria")
+        splash.after(400, step3)
+
+    def step3():
+        _set(75, "Controllo Ollama...", "localhost:11434")
+        # controllo ollama in thread separato per non bloccare la UI
+        def _check_ollama():
+            ollama_ok = False
+            try:
+                urllib.request.urlopen("http://localhost:11434", timeout=2)
+                ollama_ok = True
+            except:
+                pass
+
+            if not ollama_ok:
+                splash.after(0, lambda: _set(75, "⚠️  Ollama non attivo",
+                                              "Tento di avviarlo...", "#f39c12"))
+                try:
+                    subprocess.Popen(["ollama", "serve"],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    for _ in range(12):
+                        import time; time.sleep(0.5)
+                        try:
+                            urllib.request.urlopen("http://localhost:11434", timeout=1)
+                            ollama_ok = True
+                            break
+                        except:
+                            pass
+                except FileNotFoundError:
+                    pass
+
+                if ollama_ok:
+                    splash.after(0, lambda: _set(75, "✅ Ollama avviato!",
+                                                  "serve attivo", "#27ae60"))
+                else:
+                    splash.after(0, lambda: _set(75, "ℹ️  Ollama non trovato",
+                                                  "usa Groq o Gemini", "#f39c12"))
+            else:
+                splash.after(0, lambda: _set(75, "✅ Ollama attivo",
+                                              "localhost:11434", "#27ae60"))
+
+            splash.after(800, step4)
+
+        threading.Thread(target=_check_ollama, daemon=True).start()
+
+    def step4():
+        _set(100, "✅ Tutto pronto!", "", "#27ae60")
+        splash.after(500, splash.destroy)
+
+    splash.after(200, step1)
+    splash.mainloop()
+
+_avvia_splash()
+
+
+
 
 # --- POMODORO: variabili e logica ---
 TEMPO_LAVORO  = 25 * 60
@@ -249,26 +352,20 @@ def _carica_ai_config():
             return json.load(f)
     return {"provider": "Ollama", "api_key": "", "model": "llama3"}
 
-def _on_provider_change(*_):
+def _on_provider_change(*_, reset_model=True):
     prov = ai_provider.get()
+    modello_corrente = entry_model.get().strip() if not reset_model else ""
+    DEFAULT = {"Ollama": "llama3.2", "Groq": "llama3-8b-8192", "Gemini": "gemini-1.5-flash"}
     if prov == "Ollama":
         entry_api.config(state="disabled")
         lbl_api.config(fg="#bdc3c7")
-        entry_model.delete(0, tk.END)
-        entry_model.insert(0, "llama3.2")
-        lbl_model.config(text="Modello:")
-    elif prov == "Groq":
+    else:
         entry_api.config(state="normal")
         lbl_api.config(fg="#2c3e50")
+    # imposta il modello solo se il campo è vuoto o reset esplicito
+    if reset_model and not modello_corrente:
         entry_model.delete(0, tk.END)
-        entry_model.insert(0, "llama3-8b-8192")
-        lbl_model.config(text="Modello:")
-    elif prov == "Gemini":
-        entry_api.config(state="normal")
-        lbl_api.config(fg="#2c3e50")
-        entry_model.delete(0, tk.END)
-        entry_model.insert(0, "gemini-1.5-flash")
-        lbl_model.config(text="Modello:")
+        entry_model.insert(0, DEFAULT.get(prov, ""))
 
 def _ai_aggiungi_messaggio(ruolo, testo):
     chat_box.config(state="normal")
@@ -306,7 +403,7 @@ def _chiama_api():
 
     if prov == "Ollama":
         url  = "http://localhost:11434/api/chat"
-        body = json.dumps({"model": model or "llama3.2", "messages": ai_history, "stream": False}).encode()
+        body = json.dumps({"model": model or "llama3", "messages": ai_history, "stream": False}).encode()
         req  = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read())["message"]["content"]
@@ -374,7 +471,7 @@ def mostra_info():
 # --- 2. CREAZIONE FINESTRA ---
 root = tk.Tk()
 root.title("DESK APP")
-root.geometry("350x280")
+root.geometry("350x260")
 root.attributes("-alpha", 0.85)
 
 # --- 3. MENU A SINISTRA (Frame Grigio) ---
@@ -465,7 +562,7 @@ tk.Button(frame_prom, text="🗑  Elimina completati", command=_elimina_fatti,
 
 # --- AI: frame grafico ---
 frame_ai = tk.Frame(contenuto, bg="white")
-tk.Label(frame_ai, text="🤖  AI Chat", font=("Arial", 11, "bold"),
+tk.Label(frame_ai, text="   AI Chat", font=("Arial", 11, "bold"),
          bg="white", fg="#2c3e50").pack(pady=(8, 2))
 
 f_prov = tk.Frame(frame_ai, bg="white")
@@ -493,7 +590,7 @@ lbl_model = tk.Label(f_mod, text="Modello:", font=("Arial", 8),
                       bg="white", fg="#2c3e50")
 lbl_model.pack(side="left")
 entry_model = tk.Entry(f_mod, width=16, font=("Arial", 8), relief="solid", bd=1)
-entry_model.insert(0, "llama3.2")
+entry_model.insert(0, "llama3")
 entry_model.pack(side="left", padx=4)
 tk.Button(f_mod, text="💾", command=_salva_ai_config,
           bg="#ecf0f1", relief="flat", font=("Arial", 8), padx=4).pack(side="left")
@@ -521,7 +618,7 @@ entry_api.config(state="normal")
 entry_api.insert(0, _cfg.get("api_key", ""))
 entry_model.delete(0, tk.END)
 entry_model.insert(0, _cfg.get("model", "llama3.2"))
-_on_provider_change()
+_on_provider_change(reset_model=False)  # non sovrascrivere il modello salvato
 
 # --- INFO PC: frame grafico ---
 frame_info = tk.Frame(contenuto, bg="white")
@@ -567,7 +664,7 @@ tk.Button(menu, text="Pomodoro",   command=mostra_pomodoro).pack(pady=8, padx=8,
 tk.Button(menu, text="Note",       command=mostra_note).pack(pady=8, padx=8, fill="x")
 tk.Button(menu, text="AI",         command=mostra_ai).pack(pady=8, padx=8, fill="x")
 tk.Button(menu, text="Link",       command=mostra_link).pack(pady=8, padx=8, fill="x")
-tk.Button(menu, text="To do list", command=mostra_promemoria).pack(pady=8, padx=8, fill="x")
+tk.Button(menu, text="Promemoria", command=mostra_promemoria).pack(pady=8, padx=8, fill="x")
 tk.Button(menu, text="Info",       command=mostra_info).pack(pady=8, padx=8, fill="x")
 
 root.mainloop()
